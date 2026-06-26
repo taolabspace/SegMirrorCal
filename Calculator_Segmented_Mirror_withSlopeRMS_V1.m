@@ -1,15 +1,15 @@
 clear; clc; close all;
 
 %% 1. 数据导入和预处理
-data = readmatrix('OS_LOS0_Local.txt');
+data = readmatrix('2.txt');
 
 nodeID = data(:,1);
-X = data(:,2);
-Y = data(:,3);
-Z = data(:,4);
-UX = data(:,5);
-UY = data(:,6);
-UZ = data(:,7);
+X = data(:,2).*1000;
+Y = data(:,3).*1000;
+Z = data(:,4).*1000;
+UX = data(:,5).*1000;
+UY = data(:,6).*1000;
+UZ = data(:,7).*1000;
 
 % 变形后节点
 Xd = X + UX;
@@ -34,19 +34,56 @@ if det(R) < 0
 end
 T = center_def' - R * center_orig';
 P_corr = (R * orig_points' + T)';    % 矫正后的刚体位置
-W = deformed_points - P_corr;        % 残差（面型误差） Nx3
+
+%W = deformed_points - P_corr;        % 残差（面型误差） Nx3
 
 % 明确 Wz 为法向位移（第三列），以 m 为单位
 % 按你的脚本原样：使用 UZ 作为 Wz
 %Wz = W(:,3);
-Wz = UZ;
+%Wz = UZ;
 
-[pitch,roll,yaw]=dcm2angle(R,"XYZ");
+Residual = deformed_points - P_corr;
+
+%% ---------- Best Fit Plane ----------------
+
+Center = mean(P_corr,1);
+
+A = P_corr - Center;
+
+[~,~,V] = svd(A,0);
+
+Normal = V(:,3);
+
+Normal = Normal / norm(Normal);
+
+%% 建立局部坐标
+
+ex = V(:,1);
+
+ey = V(:,2);
+
+Local = A * [ex ey Normal];
+
+Xfit = Local(:,1);
+
+Yfit = Local(:,2);
+
+%% ---------- 法向投影 ----------------------
+
+Wz = Residual * Normal;
+
+%% 后面程序全部使用
+
+% X = Xfit;
+% 
+% Y = Yfit;
+
+[roll,pitch,yaw]=dcm2angle(R,"XYZ");
 
 PV = (max(Wz) - min(Wz)) * 1e6;
 RMS = rms(Wz) * 1e6;
 
-RigidBody_Motions=[T(1)*1e3;T(2)*1e3;T(3)*1e3;pitch*1e6;roll*1e6;yaw*1e6];
+RigidBody_Motions=[T(1)*1e3;T(2)*1e3;T(3)*1e3;roll*1e6;pitch*1e6;yaw*1e6];
 
 RigidBody_Iterm={'Tx (um)';'Ty (um)';'Tz (um)';'Rx (urad)';'Ry (urad)';'Rz (urad)'};
 RigidBody_Matrix=table(RigidBody_Iterm,RigidBody_Motions);
@@ -65,8 +102,18 @@ disp(RigidBody_Matrix)
 
 %% 3. Zernike多项式拟合
 zernike_order = 10; % 可调整
-rho = sqrt(X.^2 + Y.^2) / max(sqrt(X.^2 + Y.^2)); % 归一到单位圆
-theta = atan2(Y, X);
+
+% rho = sqrt(X.^2 + Y.^2) / max(sqrt(X.^2 + Y.^2)); % 归一到单位圆
+% theta = atan2(Y, X);
+
+Xfit = P_corr(:,1);
+Yfit = P_corr(:,2);
+
+rho = hypot(Xfit,Yfit);
+rho = rho/max(rho);
+
+theta = atan2(Yfit,Xfit);
+
 Zmat = generateZernikeBasis(rho, theta, zernike_order); % N x M
 
 [Zmat_ortho, ~] = qr(Zmat, 0); % 列正交基
@@ -111,7 +158,7 @@ end
 
 %% 4. XY多项式拟合
 xy_order = 10;
-[XYmat, xy_terms] = generateXYPolynomialBasis(X, Y, xy_order); % N x M, xy_terms: [i j] per column
+[XYmat, xy_terms] = generateXYPolynomialBasis(Xfit, Yfit, xy_order); % N x M, xy_terms: [i j] per column
 
 [XYmat_ortho, ~] = qr(XYmat, 0);
 
@@ -132,7 +179,7 @@ PV_XY_PTT_Removed = max(resid_ptt_removed_xy) - min(resid_ptt_removed_xy);
 %fprintf('（XY）去除 PTT 后 RMS=%.2f nm, PV=%.2f nm\n', RMS_XY_PTT_Removed*1e6, PV_XY_PTT_Removed*1e6);
 
 % 构造 power 向量并与 PTT 正交化
-power_vec = (X.^2 + Y.^2);
+power_vec = (Xfit.^2 + Yfit.^2);
 p = power_vec(:);
 proj_on_ptt = XYmat_ortho(:, ptt_idx_xy) * (XYmat_ortho(:, ptt_idx_xy)' * p);
 p_orth = p - proj_on_ptt;
@@ -193,10 +240,10 @@ slope_opts_ls.remove_tilt = true;
 
 % 输入：X,Y 单位 mm（与你脚本一致）；Wz 单位 m（脚本中 Wz = UZ，注：为 m）
 % grid 方法返回基于插值网格的斜率 RMS（rad 单位）
-[sx_rms_g, sy_rms_g, s_mag_rms_g, slopes_grid, info_grid] = compute_slope_rms(X, Y, W(:,3), slope_opts_grid);
+[sx_rms_g, sy_rms_g, s_mag_rms_g, slopes_grid, info_grid] = compute_slope_rms(X, Y, Wz, slope_opts_grid);
 
 % lsplane 方法在原始点上为每点拟合局部平面，返回按点的 sx, sy（rad 单位）及 RMS
-[sx_rms_l, sy_rms_l, s_mag_rms_l, slopes_ls, info_ls] = compute_slope_rms(X, Y, W(:,3), slope_opts_ls);
+[sx_rms_l, sy_rms_l, s_mag_rms_l, slopes_ls, info_ls] = compute_slope_rms(X, Y, Wz, slope_opts_ls);
 
 % 将 slope RMS 转换为更常用单位（urad）
 slopeRMS_grid_urad = s_mag_rms_g * 1e6;
@@ -265,15 +312,15 @@ xgv = linspace(min(X), max(X), nx);
 ygv = linspace(min(Y), max(Y), ny);
 [Xg, Yg] = meshgrid(xgv, ygv);
 
-F_orig = scatteredInterpolant(X, Y, Wz, 'natural', 'none');
-F_zern = scatteredInterpolant(X, Y, zernike_fit, 'natural', 'none');
-F_xy   = scatteredInterpolant(X, Y, xy_fit, 'natural', 'none');
-F_zern_ptt = scatteredInterpolant(X, Y, zernike_fit - PTT_term_zern, 'natural', 'none');
-F_xy_ptt   = scatteredInterpolant(X, Y, xy_fit - PTT_term_xy, 'natural', 'none');
-F_zern_pttpower = scatteredInterpolant(X, Y, zernike_fit - PTTPower_term_zern, 'natural', 'none');
-F_xy_pttpower   = scatteredInterpolant(X, Y, xy_fit - PTTPower_term_xy_fit, 'natural', 'none');
-F_zern_resid = scatteredInterpolant(X, Y, zernike_resid, 'natural', 'none');
-F_xy_resid   = scatteredInterpolant(X, Y, xy_resid, 'natural', 'none');
+F_orig = scatteredInterpolant(Xfit, Yfit, Wz, 'natural', 'none');
+F_zern = scatteredInterpolant(Xfit, Yfit, zernike_fit, 'natural', 'none');
+F_xy   = scatteredInterpolant(Xfit, Yfit, xy_fit, 'natural', 'none');
+F_zern_ptt = scatteredInterpolant(Xfit, Yfit, zernike_fit - PTT_term_zern, 'natural', 'none');
+F_xy_ptt   = scatteredInterpolant(Xfit, Yfit, xy_fit - PTT_term_xy, 'natural', 'none');
+F_zern_pttpower = scatteredInterpolant(Xfit, Yfit, zernike_fit - PTTPower_term_zern, 'natural', 'none');
+F_xy_pttpower   = scatteredInterpolant(Xfit, Yfit, xy_fit - PTTPower_term_xy_fit, 'natural', 'none');
+F_zern_resid = scatteredInterpolant(Xfit, Yfit, zernike_resid, 'natural', 'none');
+F_xy_resid   = scatteredInterpolant(Xfit, Yfit, xy_resid, 'natural', 'none');
 
 % 将插值结果转换为 nm（用于 color）
 Z_orig_grid = F_orig(Xg, Yg) * 1e6;          % nm
@@ -836,14 +883,21 @@ function [XYmat, terms] = generateXYPolynomialBasis(x, y, order)
     x = x(:); y = y(:);
     N = length(x); columns = {};
     terms = [];
-    for i = 0:order
-        for j = 0:order
-            if i + j <= order
-                columns{end+1} = x.^i .* y.^j;
-                terms = [terms; i, j];
-            end
-        end
+%     for i = 0:order
+%         for j = 0:order
+%             if i + j <= order
+%                 columns{end+1} = x.^i .* y.^j;
+%                 terms = [terms; i, j];
+%             end
+%         end
+%     end
+for deg=0:order
+    for i=0:deg
+        j=deg-i;
+        columns{end+1} = x.^i .* y.^j;
     end
+end
+
     XYmat = [columns{:}];
     for k = 1:size(XYmat,2)
         normf = norm(XYmat(:,k));
@@ -857,7 +911,7 @@ end
 function [sx_rms, sy_rms, s_mag_rms, slopes, info] = compute_slope_rms(X, Y, Z_m, opts)
     % 输入：
     %   X, Y: 列向量，单位 mm（与你脚本一致）
-    %   Z_m : 列向量，单位 m（Wz 在你的脚本中为 m）
+    %   Z_m : 列向量，单位 mm（Wz 在你的脚本中为 m）
     %   opts: 参数
     if nargin < 4, opts = struct(); end
     if ~isfield(opts,'method'), opts.method = 'grid'; end
